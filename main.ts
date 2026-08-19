@@ -1,9 +1,10 @@
 import { serveDir } from "https://deno.land/std@0.224.0/http/file_server.ts";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")?.replace(/\/$/, "") ?? "";
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT = 60;
+const SUPABASE_TIMEOUT_MS = 10_000;
 const requests = new Map<string, { count: number; reset: number }>();
 
 function securityHeaders(extra: Record<string, string> = {}) {
@@ -14,7 +15,7 @@ function securityHeaders(extra: Record<string, string> = {}) {
     "x-frame-options": "DENY",
     "referrer-policy": "strict-origin-when-cross-origin",
     "permissions-policy": "camera=(), microphone=(), geolocation=()",
-    "content-security-policy": "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
     ...extra,
   };
 }
@@ -37,17 +38,30 @@ function rateLimited(req: Request) {
 }
 
 async function supabaseGet(path: string) {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error("Backend Supabase configuration is missing.");
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      Accept: "application/json",
-    },
-  });
-  const body = await response.text();
-  if (!response.ok) throw new Error(`Supabase request failed (${response.status}).`);
-  return body ? JSON.parse(body) : [];
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error("Backend Supabase configuration is missing.");
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SUPABASE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      method: "GET",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+    const body = await response.text();
+    if (!response.ok) {
+      console.error("Supabase HTTP", response.status, body.slice(0, 500));
+      throw new Error(`Supabase request failed (${response.status}).`);
+    }
+    return body ? JSON.parse(body) : [];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function json(data: unknown, status = 200, extra: Record<string, string> = {}) {
@@ -65,26 +79,40 @@ Deno.serve(async (req) => {
     return json({ error: "Too many requests. Try again later." }, 429, { "retry-after": "60" });
   }
 
+  if (url.pathname === "/api/health" && req.method === "GET") {
+    return json({ ok: true, supabase_configured: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY) });
+  }
+
   if (url.pathname === "/api/markets" && req.method === "GET") {
     try {
       const markets = await supabaseGet("markets?select=id,name,order&order=order.asc");
       return json(markets);
     } catch (error) {
-      console.error(error);
-      return json({ error: "Failed to load markets." }, 502);
+      console.error("GET /api/markets", error);
+      const message = error instanceof DOMException && error.name === "AbortError"
+        ? "Supabase request timed out."
+        : error instanceof Error && error.message === "Backend Supabase configuration is missing."
+          ? error.message
+          : "Failed to load markets.";
+      return json({ error: message }, 502);
     }
   }
 
   if (url.pathname.startsWith("/api/markets/") && req.method === "GET") {
     const id = decodeURIComponent(url.pathname.slice("/api/markets/".length));
-    if (!id || id.length > 120) return json({ error: "Invalid market id." }, 400);
+    if (!id || id.length > 120 || /[\r\n]/.test(id)) return json({ error: "Invalid market id." }, 400);
     try {
       const markets = await supabaseGet(`markets?select=id,name,history_data,last_result&id=eq.${encodeURIComponent(id)}&limit=1`);
       if (!Array.isArray(markets) || markets.length === 0) return json({ error: "Market not found." }, 404);
       return json(markets[0]);
     } catch (error) {
-      console.error(error);
-      return json({ error: "Failed to load market." }, 502);
+      console.error(`GET /api/markets/${id}`, error);
+      const message = error instanceof DOMException && error.name === "AbortError"
+        ? "Supabase request timed out."
+        : error instanceof Error && error.message === "Backend Supabase configuration is missing."
+          ? error.message
+          : "Failed to load market.";
+      return json({ error: message }, 502);
     }
   }
 
