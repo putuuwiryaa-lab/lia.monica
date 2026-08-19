@@ -1,4 +1,3 @@
- 
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -74,10 +73,10 @@
 
         .market-grid { 
             display: grid; 
-            grid-template-columns: repeat(auto-fill, minmax(85px, 1fr)); 
+            grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); 
             gap: 8px; 
             margin-bottom: 16px; 
-            max-height: 180px; 
+            max-height: 200px; 
             overflow-y: auto; 
             padding: 4px;
             -webkit-overflow-scrolling: touch;
@@ -228,29 +227,43 @@
     let allNonAiResults = [];
 
     async function loadMarkets() {
-        const { data, error } = await supabase
-            .from('results')
-            .select('market_name');
-
         const loading = document.getElementById('loading-markets');
         const marketList = document.getElementById('market-list');
 
-        if (error || !data || data.length === 0) {
-            loading.textContent = "Data pasaran tidak tersedia.";
-            return;
+        try {
+            if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) {
+                throw new Error("Kredensial belum terkonfigurasi di server.");
+            }
+
+            const { data, error } = await supabase
+                .from('markets')
+                .select('id, name, order')
+                .order('order', { ascending: true });
+
+            if (error) throw error;
+
+            if (!data || data.length === 0) {
+                loading.textContent = "Data pasaran tidak tersedia.";
+                return;
+            }
+
+            loading.style.display = 'none';
+            marketList.style.display = 'grid';
+            marketList.innerHTML = '';
+
+            data.forEach(m => {
+                const displayName = m.name || m.id;
+                const label = document.createElement('label');
+                label.className = 'market-chip';
+                label.innerHTML = `<input type="checkbox" value="${m.id}" data-name="${displayName}" onchange="toggleChip(this)"> ${displayName}`;
+                marketList.appendChild(label);
+            });
+
+        } catch (err) {
+            console.error(err);
+            loading.style.color = "#ef4444";
+            loading.textContent = `Gagal memuat: ${err.message || "Periksa koneksi/database"}`;
         }
-
-        const uniqueMarkets = [...new Set(data.map(item => item.market_name))];
-        loading.style.display = 'none';
-        marketList.style.display = 'grid';
-        marketList.innerHTML = '';
-
-        uniqueMarkets.forEach(m => {
-            const label = document.createElement('label');
-            label.className = 'market-chip';
-            label.innerHTML = `<input type="checkbox" value="${m}" onchange="toggleChip(this)"> ${m}`;
-            marketList.appendChild(label);
-        });
     }
 
     function toggleChip(cb) {
@@ -282,12 +295,28 @@
         return { ai: aiStr, nonAi: sisaStr, full: `${aiStr} ${sisaStr}` };
     }
 
+    function parseHistoryResults(rawHistory, lastResult) {
+        let list = [];
+        if (rawHistory) {
+            try {
+                const parsed = JSON.parse(rawHistory);
+                if (Array.isArray(parsed)) list = parsed.map(String);
+            } catch {
+                list = String(rawHistory).match(/\b\d{4}\b/g) || [];
+            }
+        }
+        if (list.length === 0 && lastResult) {
+            list = [String(lastResult)];
+        }
+        return list;
+    }
+
     async function prosesPasaran() {
-        const selected = Array.from(document.querySelectorAll('#market-list input:checked')).map(cb => cb.value);
+        const checkboxes = Array.from(document.querySelectorAll('#market-list input:checked'));
         const errorMsg = document.getElementById('error-msg');
         const container = document.getElementById('output-container');
 
-        if (selected.length === 0) {
+        if (checkboxes.length === 0) {
             errorMsg.textContent = "Silakan pilih minimal satu pasaran.";
             errorMsg.style.display = 'block';
             return;
@@ -295,42 +324,55 @@
         errorMsg.style.display = 'none';
         container.innerHTML = '<div style="text-align:center; padding:20px; font-size:0.85rem; color:var(--text-muted);">Sedang menghitung...</div>';
 
+        const selectedIds = checkboxes.map(cb => cb.value);
+
+        const { data, error } = await supabase
+            .from('markets')
+            .select('id, name, history_data, last_result')
+            .in('id', selectedIds);
+
+        if (error || !data) {
+            container.innerHTML = `<div style="text-align:center; color:#ef4444; padding:15px; font-size:0.85rem;">Gagal mengambil data pasaran.</div>`;
+            return;
+        }
+
         allAiResults = [];
         allNonAiResults = [];
         let htmlBuffer = '';
 
-        for (const market of selected) {
-            const { data, error } = await supabase
-                .from('results')
-                .select('result')
-                .eq('market_name', market)
-                .order('created_at', { ascending: false })
-                .limit(3);
+        for (const cb of checkboxes) {
+            const marketId = cb.value;
+            const marketName = cb.getAttribute('data-name');
+            const marketData = data.find(m => m.id === marketId);
 
-            if (error || !data || data.length < 3) {
+            if (!marketData) continue;
+
+            const results = parseHistoryResults(marketData.history_data, marketData.last_result);
+
+            if (results.length < 3) {
                 htmlBuffer += `
                     <div class="market-result-card">
-                        <div class="market-title">${market}</div>
-                        <div style="color:#ef4444; font-size:0.8rem;">Riwayat keluaran belum cukup.</div>
+                        <div class="market-title">${marketName}</div>
+                        <div style="color:#ef4444; font-size:0.8rem;">Riwayat keluaran belum cukup (min 3 result).</div>
                     </div>`;
                 continue;
             }
 
-            const [A3, K3, C3, E3] = data[2].result.split('').map(Number);
-            const [A2, K2, C2, E2] = data[1].result.split('').map(Number);
-            const [A1, K1, C1, E1] = data[0].result.split('').map(Number);
+            const [A1, K1, C1, E1] = results[0].split('').map(Number);
+            const [A2, K2, C2, E2] = results[1].split('').map(Number);
+            const [A3, K3, C3, E3] = results[2].split('').map(Number);
 
             const r1 = generateData(ML[sumReduce(K1 + C1 + E1)]);
             const r2 = generateData(TY[sumReduce(ML[sumReduce(A1 + K1 + C1 + E1)] + MB[sumReduce(K1 + C1 + E1)] + ((C2 + 5) % 10))]);
             const r3 = generateData((sumReduce(ML[A3] + MB[C3] + K3) + 8) % 10);
             const r4 = generateData(((((sumReduce(C1 + E1) - ((C1 + 9) % 10)) % 10 + 10) % 10) + 5) % 10);
 
-            allAiResults.push(`[ ${market} ]\n${r1.ai}\n${r2.ai}\n${r3.ai}\n${r4.ai}`);
-            allNonAiResults.push(`[ ${market} ]\n${r1.nonAi}\n${r2.nonAi}\n${r3.nonAi}\n${r4.nonAi}`);
+            allAiResults.push(`[ ${marketName} ]\n${r1.ai}\n${r2.ai}\n${r3.ai}\n${r4.ai}`);
+            allNonAiResults.push(`[ ${marketName} ]\n${r1.nonAi}\n${r2.nonAi}\n${r3.nonAi}\n${r4.nonAi}`);
 
             htmlBuffer += `
                 <div class="market-result-card">
-                    <div class="market-title">${market}</div>
+                    <div class="market-title">${marketName}</div>
                     <pre>${r1.full}\n${r2.full}\n${r3.full}\n${r4.full}</pre>
                 </div>`;
         }
