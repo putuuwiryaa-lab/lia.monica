@@ -1,5 +1,19 @@
 const enc = new TextEncoder();
 
+function env(name: string): string | undefined {
+  try {
+    if (typeof Deno !== "undefined") {
+      const value = Deno.env.get(name);
+      if (value !== undefined) return value;
+    }
+  } catch {}
+  try {
+    const p = (globalThis as any).process?.env;
+    if (p && p[name] !== undefined) return String(p[name]);
+  } catch {}
+  return undefined;
+}
+
 async function digest(value: string): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(value)));
 }
@@ -12,7 +26,7 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 async function checkPassword(input: string, expected: string | undefined): Promise<boolean> {
-  if (!expected) return false;
+  if (expected === undefined || expected === "") return false;
   return equalBytes(await digest(input), await digest(expected));
 }
 
@@ -37,15 +51,16 @@ export default async function handler(req: Request) {
 
   try {
     const body = await req.json();
-    const user = String(body?.user || "").toLowerCase();
-    const password = String(body?.password || "");
+    const user = String(body?.user ?? "").trim().toLowerCase();
+    const password = String(body?.password ?? "");
 
-    const passwords: Record<string, string | undefined> = {
-      user1: Deno.env.get("USER1_PASSWORD"),
-      user2: Deno.env.get("USER2_PASSWORD"),
-    };
+    const expected = user === "user1"
+      ? env("USER1_PASSWORD")
+      : user === "user2"
+        ? env("USER2_PASSWORD")
+        : undefined;
 
-    if (!(user in passwords) || !password || !(await checkPassword(password, passwords[user]))) {
+    if (!expected || !password || !(await checkPassword(password, expected))) {
       return json({ ok: false, error: "Username atau password salah." }, 401);
     }
 
