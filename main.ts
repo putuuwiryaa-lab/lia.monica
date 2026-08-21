@@ -3,6 +3,8 @@ import { serveDir } from "https://deno.land/std@0.224.0/http/file_server.ts";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")?.replace(/\/$/, "") ?? "";
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const SESSION_SECRET = Deno.env.get("LOGIN_SESSION_SECRET") ?? "";
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT = 60;
 const LOGIN_RATE_LIMIT = 10;
@@ -10,7 +12,7 @@ const SUPABASE_TIMEOUT_MS = 10_000;
 const requests = new Map<string, { count: number; reset: number }>();
 const loginRequests = new Map<string, { count: number; reset: number }>();
 
-function securityHeaders(extra: Record<string, string> = {}) { return { "content-type":"application/json; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","x-frame-options":"DENY","referrer-policy":"strict-origin-when-cross-origin","permissions-policy":"camera=(), microphone=(), geolocation=()","content-security-policy":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",...extra }; }
+function securityHeaders(extra: Record<string, string> = {}) { return { "content-type":"application/json; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","x-frame-options":"DENY","referrer-policy":"strict-origin-when-cross-origin","permissions-policy":"camera=(), microphone=(), geolocation=()","content-security-policy":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none',...extra }; }
 function pageHeaders(extra: Record<string,string>={}) { const h=securityHeaders({"content-type":"text/html; charset=utf-8",...extra}); delete h["cache-control"]; h["cache-control"]="no-store"; return h; }
 function clientIp(req: Request) { return (req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown").slice(0,100); }
 function limited(store: Map<string,{count:number;reset:number}>,key:string,limit:number) { const now=Date.now(),current=store.get(key); if(!current||now>=current.reset){store.set(key,{count:1,reset:now+RATE_WINDOW_MS});return false;} current.count++; return current.count>limit; }
@@ -21,9 +23,9 @@ function json(data:unknown,status=200,extra:Record<string,string>={}){return new
 function b64(data:Uint8Array|string){const bytes=typeof data==='string'?new TextEncoder().encode(data):data;let s='';for(const b of bytes)s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 function unb64(s:string){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const bin=atob(s);return Uint8Array.from(bin,c=>c.charCodeAt(0));}
 async function sign(value:string){if(!SESSION_SECRET)throw new Error('LOGIN_SESSION_SECRET belum dikonfigurasi.');const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(SESSION_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);return b64(new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(value))));}
-async function makeSession(user:string){const payload=b64(JSON.stringify({u:user,e:Date.now()+8*60*60*1000}));return `${payload}.${await sign(payload)}`;}
+async function makeSession(user:string){const payload=b64(JSON.stringify({u:user,e:Date.now()+SESSION_TTL_MS}));return `${payload}.${await sign(payload)}`;}
 async function getSession(req:Request){const raw=req.headers.get('cookie')?.match(/(?:^|;\s*)lia_session=([^;]+)/)?.[1];if(!raw||!SESSION_SECRET)return null;const [payload,sig]=raw.split('.');if(!payload||!sig)return null;try{const expected=await sign(payload);if(sig.length!==expected.length)return null;let diff=0;for(let i=0;i<sig.length;i++)diff|=sig.charCodeAt(i)^expected.charCodeAt(i);if(diff!==0)return null;const data=JSON.parse(new TextDecoder().decode(unb64(payload)));if(!data?.u||Date.now()>Number(data.e))return null;return String(data.u);}catch{return null;}}
-function sessionCookie(token:string){return `lia_session=${token}; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Strict`}
+function sessionCookie(token:string){return `lia_session=${token}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; Secure; SameSite=Strict`}
 function clearCookie(){return `lia_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`}
 async function servePage(req:Request,path:string){return serveDir(new Request(new URL(path,req.url),req),{fsRoot:".",showIndex:true});}
 
