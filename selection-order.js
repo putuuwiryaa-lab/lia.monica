@@ -26,6 +26,41 @@
     if (index !== -1) selectedOrder.splice(index, 1);
   }
 
+  function syncSelectAllOrder() {
+    if (typeof marketData === 'undefined' || !Array.isArray(marketData)) return;
+    selectedOrder.length = 0;
+    for (const market of marketData) {
+      if (market.selected) selectedOrder.push(keyOfMarket(market));
+    }
+  }
+
+  function orderedMarkets() {
+    if (typeof marketData === 'undefined' || !Array.isArray(marketData)) return [];
+
+    const selected = marketData.filter(m => m.selected);
+    const byKey = new Map(selected.map(m => [keyOfMarket(m), m]));
+    const ordered = [];
+
+    for (const key of selectedOrder) {
+      const market = byKey.get(key);
+      if (market) {
+        ordered.push(market);
+        byKey.delete(key);
+      }
+    }
+
+    // Fallback for selections made programmatically (for example Pilih Semua).
+    for (const market of selected) {
+      const key = keyOfMarket(market);
+      if (byKey.has(key)) {
+        ordered.push(market);
+        byKey.delete(key);
+      }
+    }
+
+    return ordered;
+  }
+
   document.addEventListener('change', event => {
     const input = event.target;
     if (!(input instanceof HTMLInputElement) || input.type !== 'checkbox' || !input.closest('#market-list')) return;
@@ -48,49 +83,33 @@
     }
 
     if (target.closest('#select-all')) {
-      queueMicrotask(() => {
-        if (typeof marketData === 'undefined' || !Array.isArray(marketData)) return;
-        selectedOrder.length = 0;
-        for (const market of marketData) {
-          if (market.selected) selectedOrder.push(keyOfMarket(market));
-        }
-      });
+      queueMicrotask(syncSelectAllOrder);
     }
   });
 
+  // Capture the process click before each user's original click handler.
+  // We run prosesPasaran ourselves with marketData temporarily ordered by click order,
+  // then restore the original array immediately after the async function has taken its snapshot.
   document.addEventListener('click', event => {
     const target = event.target;
     if (!(target instanceof Element) || !target.closest('#process-button')) return;
     if (typeof marketData === 'undefined' || !Array.isArray(marketData)) return;
+    if (typeof prosesPasaran !== 'function') return;
+
+    const ordered = orderedMarkets();
+    if (ordered.length < 2) return; // Let the original handler show its normal validation.
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
 
     const original = marketData.slice();
-    const selected = original.filter(m => m.selected);
-    if (selected.length < 2) return;
+    const selectedKeys = new Set(ordered.map(keyOfMarket));
+    marketData.splice(0, marketData.length, ...ordered, ...original.filter(m => !selectedKeys.has(keyOfMarket(m))));
 
-    const selectedByKey = new Map(selected.map(m => [keyOfMarket(m), m]));
-    const orderedSelected = [];
-
-    for (const key of selectedOrder) {
-      const market = selectedByKey.get(key);
-      if (market) {
-        orderedSelected.push(market);
-        selectedByKey.delete(key);
-      }
-    }
-
-    for (const market of selected) {
-      const key = keyOfMarket(market);
-      if (selectedByKey.has(key)) {
-        orderedSelected.push(market);
-        selectedByKey.delete(key);
-      }
-    }
-
-    const selectedKeys = new Set(orderedSelected.map(keyOfMarket));
-    marketData.splice(0, marketData.length, ...orderedSelected, ...original.filter(m => !selectedKeys.has(keyOfMarket(m))));
-
-    queueMicrotask(() => {
+    try {
+      prosesPasaran();
+    } finally {
       marketData.splice(0, marketData.length, ...original);
-    });
+    }
   }, true);
 })();
